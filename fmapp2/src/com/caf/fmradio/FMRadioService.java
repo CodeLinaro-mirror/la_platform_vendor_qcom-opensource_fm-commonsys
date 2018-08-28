@@ -96,6 +96,7 @@ import android.os.Process;
 import android.app.ActivityManager;
 import android.app.ActivityManager.RunningAppProcessInfo;
 import android.media.session.MediaSession;
+import android.media.AudioRouting;
 import android.bluetooth.BluetoothA2dp;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothAdapter;
@@ -246,6 +247,8 @@ public class FMRadioService extends Service
    private boolean mEventReceived = false;
    private boolean isfmOffFromApplication = false;
 
+   private AudioRoutingListener mRoutingListener =  null;
+   private int mCurrentDevice = AudioDeviceInfo.TYPE_UNKNOWN; // current output device
    public FMRadioService() {
    }
 
@@ -274,12 +277,12 @@ public class FMRadioService extends Service
       registerExternalStorageListener();
       registerAirplaneModeStatusChanged();
       registerUserSwitch();
+      registerAudioBecomeNoisy();
 
       mSession = new MediaSession(getApplicationContext(), this.getClass().getName());
       mSession.setCallback(mSessionCallback);
       mSession.setFlags(MediaSession.FLAG_EXCLUSIVE_GLOBAL_PRIORITY |
                              MediaSession.FLAG_HANDLES_MEDIA_BUTTONS);
-      mSession.setActive(true);
       if ( false == SystemProperties.getBoolean("ro.fm.mulinst.recording.support",true)) {
            mSingleRecordingInstanceSupported = true;
       }
@@ -297,6 +300,8 @@ public class FMRadioService extends Service
       Log.d(LOGTAG, " is A2DP device Supported In HAL"+mA2dpDeviceSupportInHal);
 
       getA2dpStatusAtStart();
+
+      mRoutingListener = new AudioRoutingListener();
    }
 
    @Override
@@ -397,6 +402,8 @@ public class FMRadioService extends Service
                           .build())
                 .setBufferSizeInBytes(FM_RECORD_BUF_SIZE)
                 .build();
+        Log.d(LOGTAG," adding RoutingChangedListener() ");
+        mAudioTrack.addOnRoutingChangedListener(mRoutingListener, null);
 
         if (mMuted)
             mAudioTrack.setVolume(0.0f);
@@ -547,11 +554,13 @@ public class FMRadioService extends Service
             }
             status = AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
                                           AudioSystem.DEVICE_STATE_AVAILABLE, "", "");
+            mCurrentDevice = AudioDeviceInfo.TYPE_WIRED_HEADSET;
             if (status != AudioSystem.SUCCESS) {
                 success = false;
                 Log.e(LOGTAG, "configureFMDeviceLoopback failed! status:" + status);
                 AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
                                      AudioSystem.DEVICE_STATE_UNAVAILABLE, "", "");
+                mCurrentDevice = AudioDeviceInfo.TYPE_UNKNOWN;
             } else {
                 mIsFMDeviceLoopbackActive = true;
             }
@@ -559,6 +568,7 @@ public class FMRadioService extends Service
             AudioSystem.setDeviceConnectionState(AudioSystem.DEVICE_OUT_FM,
                                  AudioSystem.DEVICE_STATE_UNAVAILABLE, "", "");
             mIsFMDeviceLoopbackActive = false;
+            mCurrentDevice = AudioDeviceInfo.TYPE_UNKNOWN;
         }
 
         return success;
@@ -672,21 +682,19 @@ public class FMRadioService extends Service
                         Log.d(LOGTAG, "ACTION_USER_SWITCHED Intent received");
                         int userId = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, 0);
                         Log.d(LOGTAG, "ACTION_USER_SWITCHED, user ID:" + userId);
-                        if (userId == 0) {
-                            if (isFmOn()){
-                                fmOff();
-                                try {
-                                    if ((mServiceInUse) && (mCallbacks != null) ) {
-                                        mCallbacks.onDisabled();
-                                    }
-                                } catch (RemoteException e) {
-                                     e.printStackTrace();
+                        if (isFmOn()){
+                            fmOff();
+                            try {
+                                if ((mServiceInUse) && (mCallbacks != null) ) {
+                                    mCallbacks.onDisabled();
                                 }
+                            } catch (RemoteException e) {
+                                 e.printStackTrace();
                             }
+                        }
                             stop();
                             android.os.Process.killProcess(android.os.Process.myPid());
                             System.exit(0);
-                        }
                     }
                 }
             };
@@ -803,32 +811,19 @@ public class FMRadioService extends Service
             mAudioBecomeNoisyListener = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
-                    Log.d(LOGTAG, "FMMediaButtonIntentReceiver.AUDIO_BECOMING_NOISY");
                     String intentAction = intent.getAction();
-                    if (FMMediaButtonIntentReceiver.AUDIO_BECOMING_NOISY.equals(intentAction)) {
-                        mHeadsetPlugged = false;
-                       if (isFmOn())
-                       {
-                           /* Disable FM and let the UI know */
-                           fmOff(FM_OFF_FROM_ANTENNA);
-                           try
-                           {
-                              /* Notify the UI/Activity, only if the service is "bound"
-                              by an activity and if Callbacks are registered
-                              */
-                              if((mServiceInUse) && (mCallbacks != null) )
-                              {
-                                  mCallbacks.onDisabled();
-                              }
-                           } catch (RemoteException e)
-                           {
-                               e.printStackTrace();
-                           }
-                       }
+                    Log.d(LOGTAG, "intent received " + intentAction);
+                    if ((intentAction != null) &&
+                          intentAction.equals(AudioManager.ACTION_AUDIO_BECOMING_NOISY)) {
+                        if (isFmOn())
+                        {
+                            Log.d(LOGTAG, "AUDIO_BECOMING_NOISY INTENT: mute FM Audio");
+                            mute();
+                        }
                     }
                 }
             };
-            IntentFilter intentFilter = new IntentFilter(FMMediaButtonIntentReceiver.AUDIO_BECOMING_NOISY);
+            IntentFilter intentFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
             registerReceiver(mAudioBecomeNoisyListener, intentFilter);
         }
     }
@@ -1196,16 +1191,16 @@ public class FMRadioService extends Service
        if (mStoppedOnFactoryReset) {
            mStoppedOnFactoryReset = false;
            mSpeakerPhoneOn = false;
-           configureAudioDataPath(true);
        // In FM stop, the audio route is set to default audio device
-       } else if (mA2dpConnected || mSpeakerPhoneOn) {
-               String temp = mSpeakerPhoneOn ? "Speaker" : "WiredHeadset";
-               Log.d(LOGTAG, "Route audio to " + temp);
-               if(!mSpeakerPhoneOn) {
-                   startApplicationLoopBack(AudioDeviceInfo.TYPE_WIRED_HEADSET);
-               } else {
-                   startApplicationLoopBack(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
-               }
+       }
+       if (mA2dpConnected || mSpeakerPhoneOn) {
+           String temp = mSpeakerPhoneOn ? "Speaker" : "WiredHeadset";
+           Log.d(LOGTAG, "Route audio to " + temp);
+           if(!mSpeakerPhoneOn) {
+               startApplicationLoopBack(AudioDeviceInfo.TYPE_WIRED_HEADSET);
+           } else {
+               startApplicationLoopBack(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+           }
        } else {
                configureAudioDataPath(true);
        }
@@ -1673,6 +1668,20 @@ public class FMRadioService extends Service
          exitRecordSinkThread();
       }
    };
+
+    private class AudioRoutingListener implements AudioRouting.OnRoutingChangedListener {
+        public void onRoutingChanged(AudioRouting audioRouting) {
+            Log.d(LOGTAG," onRoutingChanged  + currdevice " + mCurrentDevice);
+            AudioDeviceInfo routedDevice = audioRouting.getRoutedDevice();
+            // if routing is nowhere, we get routedDevice as null
+            if(routedDevice != null) {
+                Log.d(LOGTAG," Audio Routed to device id " + routedDevice.getType());
+                if(routedDevice.getType() != mCurrentDevice) {
+                    startApplicationLoopBack(mCurrentDevice);
+                }
+            }
+        }
+    }
 
    private Handler mDelayedStopHandler = new Handler() {
       @Override
@@ -4275,6 +4284,7 @@ public class FMRadioService extends Service
             CreateRecordSessions();
             Log.d(LOGTAG,"creating AudioTrack session");
         }
+        mCurrentDevice = outputDevice.getType();
         mAudioTrack.setPreferredDevice(outputDevice);
         Log.d(LOGTAG,"PreferredDevice is set to "+ outputDevice.getType());
         if(!isRecordSinking()) {
