@@ -143,7 +143,7 @@ public class FMRadioService extends Service
    private boolean mServiceInUse = false;
    private static boolean mMuted = false;
    private static boolean mResumeAfterCall = false;
-   private static int mAudioDevice = 0;
+   private static int mAudioDevice = AudioDeviceInfo.TYPE_WIRED_HEADPHONES;
    MediaRecorder mRecorder = null;
    MediaRecorder mA2dp = null;
    private boolean mFMOn = false;
@@ -391,7 +391,7 @@ public class FMRadioService extends Service
                " DeviceLoopbackActive = " + mIsFMDeviceLoopbackActive +
                " mStoppedOnFocusLoss = "+mStoppedOnFocusLoss);
         int mAudioDeviceType;
-  
+
         AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         if(enable) {
             if(mIsFMDeviceLoopbackActive || mStoppedOnFocusLoss) {
@@ -401,6 +401,20 @@ public class FMRadioService extends Service
             }
             if (mReceiver.isCherokeeChip() && (mPref.getBoolean("SLIMBUS_SEQ", true))) {
                 enableSlimbus(ENABLE_SLIMBUS_DATA_PORT);
+            }
+            String status = audioManager.getParameters("fm_status");
+            Log.d(LOGTAG," FM hardwareLoopback Status = " + status);
+            if (status.contains("1")) {
+               /* This case usually happens, when FM is force killed through settings app
+                * and we don't get chance to disable Hardware LoopBack.
+                * Hardware LoopBack will be running,disable it first and enable again
+                * using routing set param to audio */
+               Log.d(LOGTAG," FM HardwareLoopBack Active, disable it first and enable again");
+               mAudioDeviceType =
+                  AudioDeviceInfo.TYPE_WIRED_HEADPHONES | AudioSystem.DEVICE_OUT_FM;
+               String keyValPairs = new String("fm_routing="+mAudioDeviceType);
+               Log.d(LOGTAG, "keyValPairs = "+keyValPairs);
+               audioManager.setParameters(keyValPairs);
             }
             mIsFMDeviceLoopbackActive = true;
             /*or with DEVICE_OUT_FM to support backward compatiblity*/
@@ -420,6 +434,16 @@ public class FMRadioService extends Service
         audioManager.setParameters(keyValPairs);
 
         return true;
+    }
+
+    private void setCurrentFMVolume() {
+        if(isFmOn()) {
+            AudioManager maudioManager =
+                    (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            int mCurrentVolumeIndex =
+                    maudioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+            setFMVolume(mCurrentVolumeIndex);
+        }
     }
 
     /**
@@ -584,6 +608,10 @@ public class FMRadioService extends Service
                             stopRecording();
                         }
                     } else if( action.equals(AudioManager.VOLUME_CHANGED_ACTION)) {
+                        if(!isFmOn()) {
+                            Log.d(LOGTAG, "FM is Turned off ,not applying the changed volume");
+                            return;
+                        }
                         int streamType =
                               intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_TYPE, -1);
                         if (streamType == AudioManager.STREAM_MUSIC) {
@@ -591,8 +619,19 @@ public class FMRadioService extends Service
                               intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_VALUE, -1);
                             setFMVolume(mCurrentVolumeIndex);
                         }
-                    }
+                    } else if (action.equals(BluetoothA2dp.ACTION_ACTIVE_DEVICE_CHANGED)) {
+                            mHandler.removeCallbacks(mFmVolumeHandler);
+                            mHandler.post(mFmVolumeHandler);
 
+                    } else if (action.equals(BluetoothAdapter.ACTION_STATE_CHANGED)) {
+                        int state =
+                           intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                        Log.d(LOGTAG, "ACTION_STATE_CHANGED state :"+ state);
+                        if (state == BluetoothAdapter.STATE_OFF) {
+                            mHandler.removeCallbacks(mFmVolumeHandler);
+                            mHandler.post(mFmVolumeHandler);
+                        }
+                    }
                 }
             };
             AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -602,6 +641,8 @@ public class FMRadioService extends Service
             iFilter.addAction("HDMI_CONNECTED");
             iFilter.addAction(Intent.ACTION_SHUTDOWN);
             iFilter.addAction(AudioManager.VOLUME_CHANGED_ACTION);
+            iFilter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+            iFilter.addAction(BluetoothA2dp.ACTION_ACTIVE_DEVICE_CHANGED);
             iFilter.addCategory(Intent.CATEGORY_DEFAULT);
             registerReceiver(mHeadsetReceiver, iFilter);
         }
@@ -705,7 +746,17 @@ public class FMRadioService extends Service
         }
     }
 
-
+    final Runnable    mFmVolumeHandler = new Runnable() {
+        public void run() {
+            try {
+                Thread.sleep(1000);
+            } catch (Exception ex) {
+                Log.d( LOGTAG, "RunningThread InterruptedException");
+                return;
+            }
+            setCurrentFMVolume();
+        }
+    };
 
     final Runnable    mHeadsetPluginHandler = new Runnable() {
         public void run() {
