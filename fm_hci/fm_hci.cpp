@@ -171,7 +171,7 @@ static void dequeue_fm_rx_event()
 
         if (hci.cb && hci.cb->process_event) {
             ALOGI("%s: processing the event", __func__);
-            hci.cb->process_event(NULL, (uint8_t *)evt_buf);
+            hci.cb->process_event((uint8_t *)evt_buf);
         }
 
         free(evt_buf);
@@ -364,8 +364,6 @@ static int start_tx_thread()
 *******************************************************************************/
 static void stop_tx_thread()
 {
-    int ret;
-
     ALOGI("%s:stop_tx_thread ++", __func__);
     hci.tx_cond_mtx.lock();
     hci.tx_cond.notify_all();
@@ -661,7 +659,14 @@ int fm_hci_init(fm_hci_hal_t *hci_hal)
                 __func__, hci.state);
         if(hci.state == FM_RADIO_ENABLING){
             Lock lk(hci.on_mtx);
-            hci.on_cond.wait(lk);
+            std::cv_status status = std::cv_status::no_timeout;
+            auto now = std::chrono::system_clock::now();
+            status =
+               hci.on_cond.wait_until(lk, now + std::chrono::seconds(HCI_TIMEOUT));
+             if (status == std::cv_status::timeout) {
+                 ALOGE("hci_initialize failed, kill the fm process");
+                 kill(getpid(), SIGKILL);
+             }
         }
     }
 

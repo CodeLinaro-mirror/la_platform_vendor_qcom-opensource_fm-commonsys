@@ -60,6 +60,8 @@ import android.media.AudioPortConfig;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.AudioDeviceInfo;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 
 import android.os.Environment;
 import android.os.Handler;
@@ -213,15 +215,7 @@ public class FMRadioService extends Service
    private boolean mIsSSRInProgress = false;
    private boolean mIsSSRInProgressFromActivity = false;
    private int mKeyActionDownCount = 0;
-   private static final int AUDIO_SAMPLE_RATE = 44100;
-   private static final int AUDIO_CHANNEL_CONFIG =
-                                   AudioFormat.CHANNEL_CONFIGURATION_STEREO;
-   private static final int AUDIO_ENCODING_FORMAT =
-                                           AudioFormat.ENCODING_PCM_16BIT;
-   private static final int FM_RECORD_BUF_SIZE =
-                      AudioRecord.getMinBufferSize(AUDIO_SAMPLE_RATE,
-                                   AUDIO_CHANNEL_CONFIG, AUDIO_ENCODING_FORMAT);
-   private AudioRecord mAudioRecord = null;
+
    private AudioTrack mAudioTrack = null;
    private static final int AUDIO_FRAMES_COUNT_TO_IGNORE = 3;
    private Object mEventWaitLock = new Object();
@@ -240,6 +234,7 @@ public class FMRadioService extends Service
 
    private boolean mEventReceived = false;
    private boolean isfmOffFromApplication = false;
+   private AudioFocusRequest mGainFocusReq;
 
    public FMRadioService() {
    }
@@ -273,8 +268,7 @@ public class FMRadioService extends Service
 
       mSession = new MediaSession(getApplicationContext(), this.getClass().getName());
       mSession.setCallback(mSessionCallback);
-      mSession.setFlags(MediaSession.FLAG_EXCLUSIVE_GLOBAL_PRIORITY |
-                             MediaSession.FLAG_HANDLES_MEDIA_BUTTONS);
+      mSession.setFlags(MediaSession.FLAG_EXCLUSIVE_GLOBAL_PRIORITY);
       if ( false == SystemProperties.getBoolean("ro.fm.mulinst.recording.support",true)) {
            mSingleRecordingInstanceSupported = true;
       }
@@ -293,6 +287,8 @@ public class FMRadioService extends Service
 
       getA2dpStatusAtStart();
 
+      mGainFocusReq = requestAudioFocus();
+
    }
 
    @Override
@@ -308,7 +304,8 @@ public class FMRadioService extends Service
       cancelAlarms();
       //release the audio focus listener
       AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-      audioManager.abandonAudioFocus(mAudioFocusListener);
+      audioManager.abandonAudioFocusRequest(mGainFocusReq);
+      mGainFocusReq = null;
       /* Remove the Screen On/off listener */
       if (mScreenOnOffReceiver != null) {
           unregisterReceiver(mScreenOnOffReceiver);
@@ -681,7 +678,7 @@ public class FMRadioService extends Service
                         if (cmd != null && cmd.equals("pause")) {
                             if (isFmOn()) {
                                 AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-                                audioManager.abandonAudioFocus(mAudioFocusListener);
+                                audioManager.abandonAudioFocusRequest(mGainFocusReq);
                                 mDelayedStopHandler.obtainMessage(FOCUSCHANGE, AudioManager.AUDIOFOCUS_LOSS, 0).sendToTarget();
 
                                 if (isOrderedBroadcast()) {
@@ -843,7 +840,7 @@ public class FMRadioService extends Service
    }
 
    @Override
-   public void onStart(Intent intent, int startId) {
+   public int onStartCommand(Intent intent, int flags, int startId) {
       Log.d(LOGTAG, "onStart");
       mServiceStartId = startId;
       // make sure the service will shut down on its own if it was
@@ -851,6 +848,8 @@ public class FMRadioService extends Service
       mDelayedStopHandler.removeCallbacksAndMessages(null);
       cancelAlarmDealyedServiceStop();
       setAlarmDelayedServiceStop();
+
+      return START_STICKY;
    }
 
    @Override
@@ -1000,6 +999,22 @@ public class FMRadioService extends Service
         }
    };
 
+   private AudioFocusRequest requestAudioFocus() {
+       AudioAttributes playbackAttr = new AudioAttributes.Builder()
+       .setUsage(AudioAttributes.USAGE_MEDIA)
+       .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+       .build();
+       AudioFocusRequest focusRequest =
+           new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+       .setAudioAttributes(playbackAttr)
+       .setAcceptsDelayedFocusGain(true)
+       .setWillPauseWhenDucked(true)
+       .setOnAudioFocusChangeListener(this::onAudioFocusChange)
+       .build();
+
+       return focusRequest;
+   }
+
    private void startFM() {
        Log.d(LOGTAG, "In startFM");
        if(true == mAppShutdown) { // not to send intent to AudioManager in Shutdown
@@ -1024,9 +1039,7 @@ public class FMRadioService extends Service
            for(int i = 0; i < 4; i++)
            {
               AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-              int granted =
-                   audioManager.requestAudioFocus(mAudioFocusListener, AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+              int granted = audioManager.requestAudioFocus(mGainFocusReq);
               if (granted == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                   Log.d(LOGTAG, "audio focuss granted");
                   break;
@@ -1045,11 +1058,15 @@ public class FMRadioService extends Service
        }
        mSession.setActive(true);
 
-       Log.d(LOGTAG,"FM registering for registerMediaButtonEventReceiver");
+       Log.d(LOGTAG,"FM registering for MediaButtonReceiver");
        mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
        ComponentName fmRadio = new ComponentName(this.getPackageName(),
                                   FMMediaButtonIntentReceiver.class.getName());
-       mAudioManager.registerMediaButtonEventReceiver(fmRadio);
+       Intent mediaButtonIntent =
+               new Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(fmRadio);
+       PendingIntent pi = PendingIntent.getBroadcast(getApplicationContext(), 0,
+                          mediaButtonIntent, 0);
+       mSession.setMediaButtonReceiver(pi);
 
        mStoppedOnFocusLoss = false;
        mPlaybackInProgress = true;
@@ -1729,11 +1746,8 @@ public class FMRadioService extends Service
       Log.d(LOGTAG,"in stop");
 
       if (!mServiceInUse) {
-          Log.d(LOGTAG,"calling unregisterMediaButtonEventReceiver in stop");
-          mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-          ComponentName fmRadio = new ComponentName(this.getPackageName(),
-                                  FMMediaButtonIntentReceiver.class.getName());
-          mAudioManager.unregisterMediaButtonEventReceiver(fmRadio);
+          Log.d(LOGTAG,"release media session");
+          mSession.release();
       }
       if (mSession.isActive()) {
           mSession.setActive(false);
@@ -2066,6 +2080,12 @@ public class FMRadioService extends Service
       {
           return (mService.get().getAfJmpRmssiSamplesCnt());
       }
+
+      public String getSocName()
+      {
+          return (mService.get().getSocName());
+      }
+
       public boolean setAfJmpRmssiSamplesCnt(int afJmpRmssiSmplsCnt)
       {
           return (mService.get().setAfJmpRmssiSamplesCnt(afJmpRmssiSmplsCnt));
@@ -2299,6 +2319,7 @@ public class FMRadioService extends Service
        mEventReceived = false;
        bStatus = mReceiver.enable(FmSharedPreferences.getFMConfiguration(), this);
        bStatus = waitForEvent();
+       mReceiver.setRawRdsGrpMask();
 
        if (isSpeakerEnabled()) {
            setAudioPath(false);
@@ -2339,7 +2360,7 @@ public class FMRadioService extends Service
                               // failure of enable can be because handle
                               // already open which gets effected if
                               // we disable
-            audioManager.abandonAudioFocus(mAudioFocusListener);
+            audioManager.abandonAudioFocusRequest(mGainFocusReq);
             stop();
        }
 
@@ -2410,7 +2431,7 @@ public class FMRadioService extends Service
          // If call is active, we will use audio focus to resume fm after call ends.
          // So don't abandon audiofocus automatically
          if (getCallState() == TelephonyManager.CALL_STATE_IDLE) {
-             audioManager.abandonAudioFocus(mAudioFocusListener);
+             audioManager.abandonAudioFocusRequest(mGainFocusReq);
              mStoppedOnFocusLoss = true;
          }
          //audioManager.setParameters("FMRadioOn=false");
@@ -3151,7 +3172,7 @@ public class FMRadioService extends Service
        try {
             File sampleDir = Environment.getExternalStorageDirectory();
             StatFs stat = new StatFs(sampleDir.getAbsolutePath());
-            return stat.getAvailableBlocks() * (long) stat.getBlockSize();
+            return stat.getAvailableBlocksLong() * stat.getBlockSizeLong();
        } catch (Exception e) {
             Log.i(LOGTAG, "Fail to access external storage", e);
        }
@@ -3230,7 +3251,6 @@ public class FMRadioService extends Service
       {
          Log.d(LOGTAG, "FmRxEvEnableReceiver");
          if (mReceiver != null) {
-             mReceiver.setRawRdsGrpMask();
              if (mReceiver.isCherokeeChip()) {
                  synchronized(mEventWaitLock) {
                      mEventReceived = true;
@@ -3897,6 +3917,13 @@ public class FMRadioService extends Service
           else
              return Integer.MIN_VALUE;
    }
+
+   String getSocName() {
+          if(mReceiver != null)
+             return mReceiver.getSocName();
+          else
+             return null;
+   }
    private void setAlarmSleepExpired (long duration) {
        Intent i = new Intent(SLEEP_EXPIRED_ACTION);
        AlarmManager am = (AlarmManager)getSystemService(Context.ALARM_SERVICE);
@@ -3982,8 +4009,7 @@ public class FMRadioService extends Service
           (true  == mStoppedOnFocusLoss) && isFmOn()) {
            // adding code for audio focus gain.
            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-           audioManager.requestAudioFocus(mAudioFocusListener, AudioManager.STREAM_MUSIC,
-                  AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+           audioManager.requestAudioFocus(mGainFocusReq);
            startFM();
            mStoppedOnFocusLoss = false;
        }
@@ -3997,8 +4023,7 @@ public class FMRadioService extends Service
           (true  == mStoppedOnFocusLoss) && isFmOn()) {
            // adding code for audio focus gain.
            AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-           audioManager.requestAudioFocus(mAudioFocusListener, AudioManager.STREAM_MUSIC,
-                  AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+           audioManager.requestAudioFocus(mGainFocusReq);
            startFM();
            if (mReceiver.isCherokeeChip() && (mPref.getBoolean("SLIMBUS_SEQ", true))) {
               enableSlimbus(ENABLE_SLIMBUS_DATA_PORT);
@@ -4017,11 +4042,11 @@ public class FMRadioService extends Service
        Log.d(LOGTAG, "--requestFocus");
    }
 
-   private OnAudioFocusChangeListener mAudioFocusListener = new OnAudioFocusChangeListener() {
-       public void onAudioFocusChange(int focusChange) {
+
+   public void onAudioFocusChange(int focusChange) {
            mDelayedStopHandler.obtainMessage(FOCUSCHANGE, focusChange, 0).sendToTarget();
-       }
-   };
+   }
+
 
    class A2dpServiceListener implements BluetoothProfile.ServiceListener {
        private List<BluetoothDevice> mA2dpDeviceList = null;
