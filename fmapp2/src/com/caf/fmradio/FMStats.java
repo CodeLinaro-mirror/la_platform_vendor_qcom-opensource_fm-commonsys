@@ -71,6 +71,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MenuInflater;
 import android.os.SystemClock;
+import android.graphics.Point;
 
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -293,6 +294,7 @@ public class FMStats extends Activity  {
     private BroadcastReceiver mBandSweepDwellExprdListener = null;
 
     private WakeLock mWakeLock;
+    private Dialog mDialgBandSweep;
 
     private GetNextFreqInterface mNextFreqInterface;
     private CommaSeparatedFreqFileReader mFreqFileReader;
@@ -332,6 +334,9 @@ public class FMStats extends Activity  {
                           (this, R.array.band_sweep_methods,
                             android.R.layout.simple_spinner_item);
 
+        if(mReceiver == null)
+            mReceiver = new FmReceiver();
+
         Log.d(LOGTAG, "oncreate");
         checkTransportLayer();
         if (isCherokeeChip()) {
@@ -360,9 +365,6 @@ public class FMStats extends Activity  {
             this, R.array.rf_cfg, android.R.layout.simple_spinner_item);
 
         tLayout = (TableLayout) findViewById(R.id.maintable);
-
-        if(mReceiver == null)
-            mReceiver = new FmReceiver();
 
         long curTime = System.currentTimeMillis();
         mCurrentFileName = "FMStats_".concat(
@@ -543,7 +545,7 @@ public class FMStats extends Activity  {
         Log.d(LOGTAG, "onDestroy: unbindFromService completed");
         mReceiver = null;
         mService = null;
-        removeDialog(DIALOG_BAND_SWEEP_SETTING);
+        closeDialog(DIALOG_BAND_SWEEP_SETTING);
         mWakeLock.release();
         super.onDestroy();
     }
@@ -2880,8 +2882,8 @@ public class FMStats extends Activity  {
         }
     }
     private void checkTransportLayer() {
-       String chip = SystemProperties.get("vendor.bluetooth.soc","default");
-       if (chip.equals("default"))
+       String chip = mReceiver.getSocName();
+       if (chip.equals("pronto"))
            mIsTransportSMD = true;
        else
            mIsTransportSMD = false;
@@ -2893,7 +2895,8 @@ public class FMStats extends Activity  {
     private boolean isCherokeeChip() {
         Log.d(LOGTAG, "isCherokeeChip");
 
-        String chip = SystemProperties.get("vendor.bluetooth.soc");
+        String chip = mReceiver.getSocName();
+
         if (chip.equals("cherokee"))
             return true;
         else
@@ -2901,9 +2904,8 @@ public class FMStats extends Activity  {
     }
 
     private boolean isRomeChip() {
-        String chip = "";
+        String chip = mReceiver.getSocName();
 
-        chip = SystemProperties.get("vendor.bluetooth.soc");
         if(chip.equals("rome"))
            return true;
         return false;
@@ -2920,9 +2922,11 @@ public class FMStats extends Activity  {
          /* Create a new row to be added. */
         mNewRowIds++;
         TableRow tr2 = new TableRow(getApplicationContext());
-        int width = getWindowManager().getDefaultDisplay().getWidth();
+        Point size = new Point();
+        getWindowManager().getDefaultDisplay().getSize(size);
+        int width = size.x;
         tr2.setLayoutParams(new LayoutParams(
-                     LayoutParams.FILL_PARENT,
+                     LayoutParams.MATCH_PARENT,
                      LayoutParams.WRAP_CONTENT));
         tr2.setId(mNewRowIds);
         /* Create a Button to be the row-content. */
@@ -2965,7 +2969,7 @@ public class FMStats extends Activity  {
           /* Add row to TableLayout. */
           /* Add row to TableLayout. */
         tl.addView(tr2,new TableLayout.LayoutParams(
-             LayoutParams.FILL_PARENT,
+             LayoutParams.MATCH_PARENT,
              LayoutParams.WRAP_CONTENT));
         if(null != mFileCursor)
         {
@@ -3712,17 +3716,6 @@ public class FMStats extends Activity  {
          }
      }
 
-     @Override
-     protected Dialog onCreateDialog(int id) {
-         AlertDialog.Builder dlgBuilder = new AlertDialog.Builder(this);
-         switch(id)
-         {
-         case DIALOG_BAND_SWEEP_SETTING:
-              return createBandSweepDialog(id, dlgBuilder);
-         }
-         return null;
-     }
-
      private Dialog createBandSweepDialog(int id, AlertDialog.Builder dlgBuilder) {
          LayoutInflater inflater = LayoutInflater.from(this);
          final View listview = inflater.inflate(R.layout.band_sweep_setting, null);
@@ -3755,12 +3748,12 @@ public class FMStats extends Activity  {
                            String s = dwellBox.getText().toString();
                            prevDwellTime = Integer.parseInt(s);
                         }
-                        removeDialog(DIALOG_BAND_SWEEP_SETTING);
+                        closeDialog(DIALOG_BAND_SWEEP_SETTING);
                     }
                 })
                 .setNegativeButton(R.string.band_sweep_setting_cancel, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface dialog, int id) {
-                        removeDialog(DIALOG_BAND_SWEEP_SETTING);
+                        closeDialog(DIALOG_BAND_SWEEP_SETTING);
                     }
                 });
          return dlgBuilder.create();
@@ -3768,7 +3761,9 @@ public class FMStats extends Activity  {
 
     private View.OnClickListener mClicktBandSweepSettingListener = new View.OnClickListener() {
          public void onClick(View v) {
-            showDialog(DIALOG_BAND_SWEEP_SETTING);
+            AlertDialog.Builder dlgBuilder = new AlertDialog.Builder(FMStats.this);
+            mDialgBandSweep = createBandSweepDialog(DIALOG_BAND_SWEEP_SETTING, dlgBuilder);
+            mDialgBandSweep.show();
          }
     };
 
@@ -4080,5 +4075,16 @@ public class FMStats extends Activity  {
     private void stopAllOperations() {
        stopCurTest();
        stopRecording();
+    }
+
+    private void closeDialog(int id) {
+        Log.d(LOGTAG, " closeDialog " + id);
+        switch (id) {
+        case DIALOG_BAND_SWEEP_SETTING:
+            if (mDialgBandSweep != null && mDialgBandSweep.isShowing()) {
+                mDialgBandSweep.dismiss();
+            }
+            break;
+        }
     }
 }
