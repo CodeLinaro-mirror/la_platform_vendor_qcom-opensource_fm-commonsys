@@ -291,8 +291,6 @@ public class FMRadioService extends Service
       mA2dpDeviceSupportInHal = valueStr.contains("=true");
       Log.d(LOGTAG, " is A2DP device Supported In HAL"+mA2dpDeviceSupportInHal);
 
-      getA2dpStatusAtStart();
-
    }
 
    @Override
