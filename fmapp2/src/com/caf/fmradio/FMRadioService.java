@@ -137,7 +137,7 @@ public class FMRadioService extends Service
    private BroadcastReceiver mRegisterUserSwitched;
    private IFMRadioServiceCallbacks mCallbacks;
    private static FmSharedPreferences mPrefs;
-   private boolean mHeadsetPlugged = false;
+   private boolean mHeadsetPlugged = true;
    private boolean mInternalAntennaAvailable = false;
    private WakeLock mWakeLock;
    private int mServiceStartId = -1;
