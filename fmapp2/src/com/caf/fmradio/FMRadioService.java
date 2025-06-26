@@ -236,6 +236,8 @@ public class FMRadioService extends Service
    private boolean isfmOffFromApplication = false;
    private AudioFocusRequest mGainFocusReq;
    private PhoneStateCallback mPhoneStateCallback;
+   private static boolean sIsBike =
+            SystemProperties.getBoolean("ro.hw.vehicle.isbike", false);
 
    public FMRadioService() {
    }
@@ -285,6 +287,11 @@ public class FMRadioService extends Service
       Log.d(LOGTAG, " is A2DP device Supported In HAL"+mA2dpDeviceSupportInHal);
 
       mGainFocusReq = requestAudioFocus();
+      //2w does not support external headset.so use internal antenna
+      if (sIsBike) {
+          mHeadsetPlugged = true;
+          return;
+      }
       AudioManager mAudioManager =
           (AudioManager) getSystemService(Context.AUDIO_SERVICE);
       AudioDeviceInfo[] deviceList = mAudioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
